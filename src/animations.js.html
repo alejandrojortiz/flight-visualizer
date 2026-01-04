@@ -615,6 +615,39 @@ function calculateBearing(lat1, lng1, lat2, lng2) {
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
+// ========================================================================
+// SHARED TRANSPORT ICONS (Material Symbols - Apache 2.0)
+// All icons point North/Up by default for easy rotation
+// ========================================================================
+
+const TRANSPORT_ICON_PATHS = {
+  // Material Symbol: flight (natively points North/Up)
+  flight: 'M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z',
+  // Material Symbol: train (Front view = North)
+  train: 'M12 2c-4 0-8 .5-8 4v9.5C4 17.43 5.57 19 7.5 19L6 20.5v.5h12v-.5L16.5 19c1.93 0 3.5-1.57 3.5-3.5V6c0-3.5-3.96-4-8-4zm0 2c3.5 0 6 .5 6 2v2H6V6c0-1.5 2.5-2 6-2zm6 11.5c0 .83-.67 1.5-1.5 1.5h-9c-.83 0-1.5-.67-1.5-1.5V12h12v3.5zm-6-2.5c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
+  // Material Symbol: directions_car (Front view = North)
+  car: 'M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z',
+  // Custom top-down ferry (Material's boat is side-view)
+  ferry: 'M12 2C9 2 7 4 7 7v10c0 3 2 5 5 5s5-2 5-5V7c0-3-2-5-5-5zm0 2c1.5 0 3 1.5 3 3v9c0 1.5-1.5 3-3 3s-3-1.5-3-3V7c0-1.5 1.5-3 3-3z'
+};
+
+// Ferry has an extra detail rect
+const FERRY_DETAIL = '<rect x="9" y="8" width="6" height="8" rx="1" fill="#0a0a1a" opacity="0.3"/>';
+
+/**
+ * Generate SVG HTML for a transport icon
+ * @param {string} mode - Transport mode (flight, train, car, ferry)
+ * @param {number} size - Icon size in pixels
+ * @param {string} color - Fill color
+ * @param {string} shadowStyle - CSS filter for shadow
+ * @returns {string} SVG HTML string
+ */
+function getTransportIconSvg(mode, size, color, shadowStyle) {
+  const path = TRANSPORT_ICON_PATHS[mode] || TRANSPORT_ICON_PATHS.flight;
+  const extra = mode === 'ferry' ? FERRY_DETAIL : '';
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" style="${shadowStyle}"><path d="${path}" fill="${color}"/>${extra}</svg>`;
+}
+
 // Persistent inner icon element - we rotate this directly
 let innerIconElement = null;
 let currentIconMode = null;
@@ -636,36 +669,11 @@ function getInnerIcon(mode) {
     justify-content: center;
   `;
   
-  // Icon color - white for visibility against the orange arc
   const color = '#ffffff';
   const shadow = 'filter: drop-shadow(0 0 6px rgba(255,255,255,0.8)) drop-shadow(0 2px 4px rgba(0,0,0,0.6));';
+  const size = mode === 'flight' ? 28 : 24;
   
-  // Material Symbols icons (Apache 2.0) - all point North/Up by default
-  const icons = {
-    // Material Symbol: flight (natively points North/Up)
-    flight: `
-      <svg viewBox="0 0 24 24" width="28" height="28" style="${shadow}">
-        <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" fill="${color}"/>
-      </svg>`,
-    // Material Symbol: train (Front view = North)
-    train: `
-      <svg viewBox="0 0 24 24" width="24" height="24" style="${shadow}">
-        <path d="M12 2c-4 0-8 .5-8 4v9.5C4 17.43 5.57 19 7.5 19L6 20.5v.5h12v-.5L16.5 19c1.93 0 3.5-1.57 3.5-3.5V6c0-3.5-3.96-4-8-4zm0 2c3.5 0 6 .5 6 2v2H6V6c0-1.5 2.5-2 6-2zm6 11.5c0 .83-.67 1.5-1.5 1.5h-9c-.83 0-1.5-.67-1.5-1.5V12h12v3.5zm-6-2.5c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="${color}"/>
-      </svg>`,
-    // Material Symbol: directions_car (Front view = North)
-    car: `
-      <svg viewBox="0 0 24 24" width="24" height="24" style="${shadow}">
-        <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z" fill="${color}"/>
-      </svg>`,
-    // Custom top-down ferry (Material's boat is side-view)
-    ferry: `
-      <svg viewBox="0 0 24 24" width="24" height="24" style="${shadow}">
-        <path d="M12 2C9 2 7 4 7 7v10c0 3 2 5 5 5s5-2 5-5V7c0-3-2-5-5-5zm0 2c1.5 0 3 1.5 3 3v9c0 1.5-1.5 3-3 3s-3-1.5-3-3V7c0-1.5 1.5-3 3-3z" fill="${color}"/>
-        <rect x="9" y="8" width="6" height="8" rx="1" fill="#0a0a1a" opacity="0.3"/>
-      </svg>`
-  };
-  
-  innerIconElement.innerHTML = icons[mode] || icons.flight;
+  innerIconElement.innerHTML = getTransportIconSvg(mode, size, color, shadow);
   return innerIconElement;
 }
 
@@ -900,6 +908,27 @@ async function showMapOverlay(arc, leg) {
 }
 
 /**
+ * Create a Leaflet divIcon with the appropriate transport icon
+ * @param {string} mode - Transport mode (flight, train, car, ferry)
+ * @param {number} bearing - Direction in degrees (0 = North)
+ * @returns {L.DivIcon} Leaflet icon
+ */
+function createMapIcon(mode, bearing) {
+  const color = '#ffffff';
+  const shadow = 'filter: drop-shadow(0 0 4px rgba(244,162,97,0.9)) drop-shadow(0 1px 2px rgba(0,0,0,0.5));';
+  const size = mode === 'flight' ? 24 : 22;
+  
+  const svg = getTransportIconSvg(mode, size, color, shadow);
+  
+  return L.divIcon({
+    className: 'traveling-marker',
+    html: `<div style="transform: rotate(${bearing}deg); display: flex; align-items: center; justify-content: center;">${svg}</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12]
+  });
+}
+
+/**
  * Animate the route on the 2D map with traveling marker
  * @param {Object} arc - Arc data
  * @param {number} duration - Animation duration in ms
@@ -923,14 +952,11 @@ function animateRouteOnMap(arc, duration) {
     const startTime = performance.now();
     const totalLength = arc.distance * 30; // Approximate dash length
     
-    // Create traveling marker
-    const markerIcon = L.divIcon({
-      className: 'traveling-marker',
-      html: `<div style="width: 12px; height: 12px; background: #f4a261; border-radius: 50%; box-shadow: 0 0 12px #f4a261, 0 0 24px #e76f51;"></div>`,
-      iconSize: [12, 12],
-      iconAnchor: [6, 6]
-    });
+    // Calculate initial bearing
+    const initialBearing = calculateBearing(arc.startLat, arc.startLng, arc.endLat, arc.endLng);
     
+    // Create traveling marker with icon
+    const markerIcon = createMapIcon(arc.mode, initialBearing);
     mapMarkerLayer = L.marker([arc.startLat, arc.startLng], { icon: markerIcon }).addTo(leafletMap);
     
     function tick(now) {
@@ -951,10 +977,18 @@ function animateRouteOnMap(arc, duration) {
         dashArray: `${eased * totalLength}, ${totalLength}`
       });
       
-      // Update marker position
+      // Calculate current and next position for bearing
       const lat = arc.startLat + (arc.endLat - arc.startLat) * eased;
       const lng = arc.startLng + (arc.endLng - arc.startLng) * eased;
+      
+      const lookAhead = Math.min(eased + 0.02, 1);
+      const nextLat = arc.startLat + (arc.endLat - arc.startLat) * lookAhead;
+      const nextLng = arc.startLng + (arc.endLng - arc.startLng) * lookAhead;
+      const bearing = calculateBearing(lat, lng, nextLat, nextLng);
+      
+      // Update marker position and rotation
       mapMarkerLayer.setLatLng([lat, lng]);
+      mapMarkerLayer.setIcon(createMapIcon(arc.mode, bearing));
       
       if (t < 1 && isAnimating()) {
         requestAnimationFrame(tick);
