@@ -63,6 +63,7 @@ function stopYearInReview() {
   // Clear traveling indicator and restore globe state
   if (globe) {
     globe.pointsData([]);
+    globe.htmlElementsData([]);
     
     // Restore all arcs
     globe
@@ -98,6 +99,7 @@ function stopTripAnimation() {
   // Clear traveling indicator and restore globe state
   if (globe) {
     globe.pointsData([]);
+    globe.htmlElementsData([]);
     globe.arcsTransitionDuration(300);
     
     // Resume auto-rotation
@@ -538,7 +540,154 @@ function calculateLegAltitude(distanceKm, mode) {
 }
 
 /**
- * Animate a traveling indicator dot along an arc
+ * Interpolate along a great circle path between two points.
+ * Uses spherical linear interpolation (slerp) to match Globe.gl's arc rendering.
+ * @param {number} lat1 - Start latitude in degrees
+ * @param {number} lng1 - Start longitude in degrees
+ * @param {number} lat2 - End latitude in degrees
+ * @param {number} lng2 - End longitude in degrees
+ * @param {number} t - Interpolation factor (0 to 1)
+ * @returns {{lat: number, lng: number}} Interpolated position
+ */
+function interpolateGreatCircle(lat1, lng1, lat2, lng2, t) {
+  // Convert to radians
+  const toRad = deg => deg * Math.PI / 180;
+  const toDeg = rad => rad * 180 / Math.PI;
+  
+  const φ1 = toRad(lat1);
+  const λ1 = toRad(lng1);
+  const φ2 = toRad(lat2);
+  const λ2 = toRad(lng2);
+  
+  // Calculate angular distance between points
+  const Δλ = λ2 - λ1;
+  const cosφ1 = Math.cos(φ1);
+  const cosφ2 = Math.cos(φ2);
+  const sinφ1 = Math.sin(φ1);
+  const sinφ2 = Math.sin(φ2);
+  
+  const d = Math.acos(
+    sinφ1 * sinφ2 + cosφ1 * cosφ2 * Math.cos(Δλ)
+  );
+  
+  // Handle very short distances (avoid division by zero)
+  if (d < 0.0001) {
+    return {
+      lat: lat1 + (lat2 - lat1) * t,
+      lng: lng1 + (lng2 - lng1) * t
+    };
+  }
+  
+  // Spherical linear interpolation
+  const sinD = Math.sin(d);
+  const a = Math.sin((1 - t) * d) / sinD;
+  const b = Math.sin(t * d) / sinD;
+  
+  // Calculate 3D Cartesian coordinates
+  const x = a * cosφ1 * Math.cos(λ1) + b * cosφ2 * Math.cos(λ2);
+  const y = a * cosφ1 * Math.sin(λ1) + b * cosφ2 * Math.sin(λ2);
+  const z = a * sinφ1 + b * sinφ2;
+  
+  // Convert back to lat/lng
+  const φ = Math.atan2(z, Math.sqrt(x * x + y * y));
+  const λ = Math.atan2(y, x);
+  
+  return {
+    lat: toDeg(φ),
+    lng: toDeg(λ)
+  };
+}
+
+/**
+ * Calculate the bearing (direction) between two points in degrees
+ */
+function calculateBearing(lat1, lng1, lat2, lng2) {
+  const toRad = deg => deg * Math.PI / 180;
+  const toDeg = rad => rad * 180 / Math.PI;
+  
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δλ = toRad(lng2 - lng1);
+  
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+// Persistent inner icon element - we rotate this directly
+let innerIconElement = null;
+let currentIconMode = null;
+
+/**
+ * Get or create the inner icon SVG element.
+ * This is reused and rotated directly each frame.
+ */
+function getInnerIcon(mode) {
+  if (innerIconElement && currentIconMode === mode) {
+    return innerIconElement;
+  }
+  
+  currentIconMode = mode;
+  innerIconElement = document.createElement('div');
+  innerIconElement.style.cssText = `
+    display: flex; 
+    align-items: center; 
+    justify-content: center;
+  `;
+  
+  // Icon color - white for visibility against the orange arc
+  const color = '#ffffff';
+  const shadow = 'filter: drop-shadow(0 0 6px rgba(255,255,255,0.8)) drop-shadow(0 2px 4px rgba(0,0,0,0.6));';
+  
+  const icons = {
+    flight: `
+      <svg viewBox="0 0 24 24" width="28" height="28" style="${shadow}">
+        <path d="M12 2 L14 8 L21 10 L14 11 L14 18 L17 20 L17 21 L12 19 L7 21 L7 20 L10 18 L10 11 L3 10 L10 8 Z" fill="${color}"/>
+      </svg>`,
+    train: `
+      <svg viewBox="0 0 24 24" width="24" height="24" style="${shadow}">
+        <rect x="7" y="4" width="10" height="14" rx="2" fill="${color}"/>
+        <rect x="9" y="6" width="6" height="4" rx="1" fill="#0a0a1a"/>
+        <circle cx="9" cy="15" r="1.5" fill="#0a0a1a"/>
+        <circle cx="15" cy="15" r="1.5" fill="#0a0a1a"/>
+        <path d="M12 2 L14 4 L10 4 Z" fill="${color}"/>
+      </svg>`,
+    car: `
+      <svg viewBox="0 0 24 24" width="22" height="22" style="${shadow}">
+        <path d="M6 10 L7 6 L17 6 L18 10 L19 10 L19 16 L17 16 L17 18 L15 18 L15 16 L9 16 L9 18 L7 18 L7 16 L5 16 L5 10 Z" fill="${color}"/>
+        <rect x="8" y="7" width="8" height="3" rx="1" fill="#0a0a1a"/>
+        <circle cx="8" cy="13" r="1.5" fill="#0a0a1a"/>
+        <circle cx="16" cy="13" r="1.5" fill="#0a0a1a"/>
+      </svg>`,
+    ferry: `
+      <svg viewBox="0 0 24 24" width="24" height="24" style="${shadow}">
+        <path d="M12 3 L13 7 L17 7 L17 12 L19 14 L12 17 L5 14 L7 12 L7 7 L11 7 Z" fill="${color}"/>
+        <path d="M4 18 Q8 15 12 18 Q16 21 20 18 L20 20 Q16 23 12 20 Q8 17 4 20 Z" fill="#2a9d8f"/>
+      </svg>`
+  };
+  
+  innerIconElement.innerHTML = icons[mode] || icons.flight;
+  return innerIconElement;
+}
+
+/**
+ * Create a wrapper containing a rotated clone of the icon.
+ * - New wrapper each frame → Globe.gl repositions it
+ * - Cloned icon with rotation applied → consistent appearance
+ */
+function createIconWrapper(mode, bearing) {
+  const iconTemplate = getInnerIcon(mode);
+  const iconClone = iconTemplate.cloneNode(true);
+  iconClone.style.transform = `rotate(${bearing}deg)`;
+  
+  const wrapper = document.createElement('div');
+  wrapper.appendChild(iconClone);
+  return wrapper;
+}
+
+/**
+ * Animate a traveling indicator along an arc
  */
 function animateTravelIndicator(arc, duration) {
   return new Promise(resolve => {
@@ -547,15 +696,14 @@ function animateTravelIndicator(arc, duration) {
     // Check if animation should run (Year in Review OR single trip animation)
     const isAnimating = () => isYearInReview || isTripAnimating;
     
-    // Calculate point size based on distance - larger for short legs (closer zoom)
-    const pointSize = arc.distance < 100 ? 0.15 
-                    : arc.distance < 300 ? 0.2 
-                    : arc.distance < 1000 ? 0.3 
-                    : 0.4;
+    // Altitude offset to position icon above the arc
+    const altitudeOffset = 0.015;
     
     function tick(now) {
       if (!isAnimating()) {
-        globe.pointsData([]);
+        globe.htmlElementsData([]);
+        innerIconElement = null;
+        currentIconMode = null;
         resolve();
         return;
       }
@@ -567,26 +715,44 @@ function animateTravelIndicator(arc, duration) {
         ? 2 * t * t 
         : 1 - Math.pow(-2 * t + 2, 2) / 2;
       
-      // Interpolate position along great circle (simple linear for now)
-      const lat = arc.startLat + (arc.endLat - arc.startLat) * eased;
-      const lng = arc.startLng + (arc.endLng - arc.startLng) * eased;
+      // Interpolate position along great circle (matches Globe.gl arc rendering)
+      const pos = interpolateGreatCircle(
+        arc.startLat, arc.startLng,
+        arc.endLat, arc.endLng,
+        eased
+      );
       
-      // Calculate altitude along arc (parabolic) - flatter for surface travel
-      const isGround = arc.mode === 'train' || arc.mode === 'car' || arc.mode === 'ferry';
-      const arcHeight = isGround ? arc.altitude * 20 : arc.altitude * 100;
-      const altitude = arcHeight * 4 * eased * (1 - eased); // Parabola peaking at t=0.5
+      // Calculate altitude to match the arc's visual height (parabolic curve)
+      // arc.altitude is already the peak height as a proportion of globe radius
+      const arcAltitude = arc.altitude * 4 * eased * (1 - eased);
+      // Position icon slightly above the arc
+      const altitude = arcAltitude + altitudeOffset;
+      
+      // Calculate bearing for icon rotation
+      const lookAhead = Math.min(eased + 0.01, 1);
+      const nextPos = interpolateGreatCircle(
+        arc.startLat, arc.startLng,
+        arc.endLat, arc.endLng,
+        lookAhead
+      );
+      const bearing = calculateBearing(pos.lat, pos.lng, nextPos.lat, nextPos.lng);
+      
+      // Create wrapper with rotated icon inside
+      // - New wrapper each frame → Globe.gl repositions correctly
+      // - Same inner icon → rotation updates work
+      const wrapper = createIconWrapper(arc.mode, bearing);
       
       globe
-        .pointsData([{ lat, lng, altitude }])
-        .pointColor(() => '#f4a261')
-        .pointAltitude(d => d.altitude)
-        .pointRadius(pointSize)
-        .pointsMerge(false);
+        .htmlElementsData([{ lat: pos.lat, lng: pos.lng, altitude }])
+        .htmlElement(() => wrapper)
+        .htmlAltitude(d => d.altitude);
       
       if (t < 1 && isAnimating()) {
         requestAnimationFrame(tick);
       } else {
-        globe.pointsData([]); // Remove indicator
+        globe.htmlElementsData([]); // Remove indicator
+        innerIconElement = null;
+        currentIconMode = null;
         resolve();
       }
     }
