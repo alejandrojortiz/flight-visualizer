@@ -1,0 +1,23 @@
+# Clasp local config (contains script ID)
+.clasp.json
+
+# Node modules (if using any build tools)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local development
+.env
+.env.local
+

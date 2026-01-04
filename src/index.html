@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight Visualizer</title>
+  <script src="https://cdn.tailwindcss.com/3.4.0"></script>
+  <script src="https://unpkg.com/globe.gl@2.27.0/dist/globe.gl.min.js"></script>
+  <!-- Leaflet for 2D map overlay on short legs -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            space: '#0a0a1a',
+            'globe-surface': '#1a1a2e',
+            'globe-border': '#2d2d44',
+            'route-active': '#f4a261',
+            'route-glow': '#e76f51',
+            'route-muted': '#4a4a5a',
+            accent: '#2a9d8f'
+          },
+          fontFamily: {
+            sans: ['Outfit', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <?!= include('styles') ?>
+</head>
+<body class="h-screen overflow-hidden bg-space text-slate-100 font-sans">
+
+  <div id="app" class="h-full flex flex-col">
+
+    <!-- Loading Screen -->
+    <div id="loading" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-space transition-opacity duration-500">
+      <div class="relative w-20 h-20 mb-8">
+        <!-- Orbital rings -->
+        <div class="absolute inset-0 rounded-full border-2 border-transparent border-t-route-active animate-orbit"></div>
+        <div class="absolute inset-0 rounded-full border-2 border-transparent border-r-accent animate-orbit-reverse"></div>
+        <!-- Inner globe -->
+        <div class="absolute inset-4 rounded-full bg-gradient-to-br from-globe-surface to-space border border-globe-border"></div>
+      </div>
+      <span class="text-sm font-light tracking-[0.15em] uppercase text-slate-400">Loading your travels</span>
+    </div>
+
+    <!-- Main Content -->
+    <div id="content" class="h-full flex flex-col opacity-0 transition-opacity duration-500">
+
+      <!-- Header -->
+      <header class="h-14 flex items-center justify-between px-5 bg-space/80 backdrop-blur border-b border-globe-border shrink-0 z-40">
+        <h1 class="flex items-center gap-2.5 text-lg font-medium">
+          <span class="text-route-active">✦</span>
+          <span id="app-title">Flight Visualizer</span>
+        </h1>
+        <div class="flex gap-2">
+          <button id="sparkle-btn" class="w-11 h-11 flex items-center justify-center bg-transparent border border-globe-border rounded-lg text-xl hover:bg-globe-surface hover:border-accent transition-all active:scale-95" aria-label="Year in Review">✨</button>
+          <button id="settings-btn" class="w-11 h-11 flex items-center justify-center bg-transparent border border-globe-border rounded-lg text-xl hover:bg-globe-surface hover:border-accent transition-all active:scale-95" aria-label="Settings">⚙️</button>
+        </div>
+      </header>
+
+      <!-- Content Area -->
+      <div class="flex-1 flex overflow-hidden">
+
+        <!-- Sidebar (Desktop) -->
+        <aside id="sidebar" class="hidden lg:flex w-60 flex-col bg-globe-surface/60 backdrop-blur border-r border-globe-border shrink-0">
+          <div class="px-5 py-4 border-b border-globe-border flex items-center justify-between">
+            <h2 class="text-xs font-medium uppercase tracking-widest text-slate-400">Trips</h2>
+            <button id="add-trip-btn" class="w-8 h-8 flex items-center justify-center rounded-lg border border-globe-border hover:bg-globe-surface hover:border-accent transition-all text-lg" aria-label="Add Trip">+</button>
+          </div>
+          <nav id="trip-list" class="flex-1 overflow-y-auto p-2 space-y-1">
+            <!-- Trips rendered by JS -->
+          </nav>
+        </aside>
+
+        <!-- Trip Overflow Menu (positioned via JS) -->
+        <div id="trip-menu" class="hidden absolute bg-globe-surface border border-globe-border rounded-lg shadow-xl py-1 z-50 min-w-[140px]">
+          <button id="menu-edit" class="w-full px-4 py-2 text-left text-sm hover:bg-accent/20 transition-colors">Edit</button>
+          <button id="menu-delete" class="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-red-500/20 transition-colors">Delete</button>
+        </div>
+
+        <!-- Globe Container Wrapper -->
+        <div class="flex-1 relative overflow-hidden">
+          <!-- Globe Container -->
+          <main id="globe-container" class="absolute inset-0" style="background: radial-gradient(ellipse at center, #1a1a2e 0%, #0a0a1a 100%);"></main>
+          
+          <!-- 2D Map Overlay for short leg animations (sibling to avoid Globe.gl clearing it) -->
+          <div id="map-overlay">
+            <div id="leaflet-map"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Details Panel (Desktop) -->
+      <section id="details-panel" class="hidden lg:flex h-40 bg-globe-surface/80 backdrop-blur border-t border-globe-border px-5 py-4 gap-8 shrink-0">
+        <div class="flex-1">
+          <h3 id="details-title" class="text-xl font-medium mb-1">Select a trip</h3>
+          <p id="details-subtitle" class="text-sm text-slate-400 mb-3">Click on a trip to see details</p>
+          <div id="details-route" class="flex items-center gap-2 flex-wrap text-sm"></div>
+        </div>
+        <div id="details-stats" class="flex gap-8"></div>
+      </section>
+
+      <!-- Mobile: Trip Strip -->
+      <div id="trip-strip" class="lg:hidden h-[72px] flex items-center gap-2 px-3 bg-globe-surface/80 backdrop-blur border-t border-globe-border overflow-x-auto scrollbar-hide">
+        <!-- Add button for mobile -->
+        <button id="add-trip-btn-mobile" class="w-11 h-11 flex items-center justify-center rounded-full border border-globe-border bg-globe-surface hover:border-accent transition-all text-lg shrink-0" aria-label="Add Trip">+</button>
+        <!-- Trips rendered by JS -->
+      </div>
+
+      <!-- Mobile: Bottom Sheet -->
+      <section id="bottom-sheet" class="lg:hidden hidden bg-globe-surface/95 backdrop-blur border-t border-globe-border rounded-t-2xl px-5 py-4 pb-6">
+        <div class="w-9 h-1 bg-globe-border rounded-full mx-auto mb-4"></div>
+        <h3 id="sheet-title" class="text-lg font-medium mb-1"></h3>
+        <p id="sheet-subtitle" class="text-sm text-slate-400 mb-2"></p>
+        <div id="sheet-route" class="text-sm text-accent flex items-center gap-1.5 flex-wrap"></div>
+      </section>
+
+    </div>
+
+    <!-- Add/Edit Trip Modal -->
+    <div id="trip-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+      <!-- Backdrop -->
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" id="modal-backdrop"></div>
+      
+      <!-- Modal Content -->
+      <div class="relative bg-globe-surface border border-globe-border rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col sm:max-h-[90vh] max-sm:h-full max-sm:max-h-full max-sm:rounded-none">
+        
+        <!-- Header -->
+        <div class="px-6 py-4 border-b border-globe-border flex items-center justify-between shrink-0">
+          <h2 id="modal-title" class="text-lg font-medium">New Trip</h2>
+          <button id="modal-close" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-space transition-colors">✕</button>
+        </div>
+        
+        <!-- Body (scrollable) -->
+        <div class="flex-1 overflow-y-auto p-6 space-y-6">
+          
+          <!-- Trip Details -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="md:col-span-2">
+              <label class="block text-sm text-slate-400 mb-1.5">Trip Name</label>
+              <input type="text" id="trip-name" class="w-full px-4 py-2.5 bg-space border border-globe-border rounded-lg focus:border-accent focus:outline-none transition-colors" placeholder="e.g., Europe Adventure">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1.5">Start Date</label>
+              <input type="date" id="trip-start" class="w-full px-4 py-2.5 bg-space border border-globe-border rounded-lg focus:border-accent focus:outline-none transition-colors text-slate-100">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-1.5">End Date</label>
+              <input type="date" id="trip-end" class="w-full px-4 py-2.5 bg-space border border-globe-border rounded-lg focus:border-accent focus:outline-none transition-colors text-slate-100">
+            </div>
+          </div>
+          
+          <!-- Legs Section -->
+          <div>
+            <div class="flex items-center justify-between mb-3">
+              <label class="text-sm text-slate-400">Legs</label>
+              <button id="add-leg-btn" class="text-sm text-accent hover:text-accent/80 transition-colors">+ Add Leg</button>
+            </div>
+            
+            <div id="legs-container" class="space-y-3">
+              <!-- Leg rows rendered by JS -->
+            </div>
+          </div>
+          
+          <!-- Error display -->
+          <div id="modal-error" class="hidden text-red-400 text-sm bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3"></div>
+          
+        </div>
+        
+        <!-- Footer -->
+        <div class="px-6 py-4 border-t border-globe-border flex justify-end gap-3 shrink-0">
+          <button id="modal-cancel" class="px-5 py-2.5 rounded-lg border border-globe-border hover:bg-space transition-colors">Cancel</button>
+          <button id="modal-save" class="px-5 py-2.5 rounded-lg bg-accent text-white hover:bg-accent/80 transition-colors">Save Trip</button>
+        </div>
+        
+      </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="delete-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" id="delete-backdrop"></div>
+      <div class="relative bg-globe-surface border border-globe-border rounded-2xl w-full max-w-md p-6">
+        <h2 class="text-lg font-medium mb-2">Delete Trip?</h2>
+        <p id="delete-message" class="text-slate-400 mb-6">Are you sure you want to delete this trip? This cannot be undone.</p>
+        <div class="flex justify-end gap-3">
+          <button id="delete-cancel" class="px-5 py-2.5 rounded-lg border border-globe-border hover:bg-space transition-colors">Cancel</button>
+          <button id="delete-confirm" class="px-5 py-2.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors">Delete</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- JavaScript Modules -->
+  <?!= include('app.js') ?>
+  <?!= include('globe.js') ?>
+  <?!= include('animations.js') ?>
+  <?!= include('ui.js') ?>
+
+</body>
+</html>

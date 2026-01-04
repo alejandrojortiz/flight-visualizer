@@ -1,0 +1,602 @@
+<script>
+// ========================================================================
+// RENDER FUNCTIONS
+// ========================================================================
+
+function renderTripList() {
+  // Sort trips by start date (earliest first)
+  const sortedTrips = [...TRIPS].sort((a, b) => {
+    const dateA = parseLocalDate(a.startDate);
+    const dateB = parseLocalDate(b.startDate);
+    return dateA - dateB;
+  });
+
+  // Desktop sidebar
+  tripList.innerHTML = sortedTrips.map(t => `
+    <div class="trip-item group flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition-all
+      ${selectedTripId === t.id ? 'bg-globe-surface border border-accent' : 'hover:bg-globe-surface border border-transparent'}
+      ${selectedTripId && selectedTripId !== t.id ? 'opacity-40' : ''}"
+      data-trip-id="${t.id}">
+      <div class="w-2 h-2 rounded-full bg-route-active shrink-0 ${selectedTripId === t.id ? 'shadow-[0_0_8px_var(--tw-shadow-color)] shadow-route-glow' : ''}"></div>
+      <div class="flex-1 min-w-0">
+        <div class="font-medium truncate">${t.name}</div>
+        <div class="text-xs text-slate-400">${formatDateRange(t.startDate, t.endDate)}</div>
+      </div>
+      <button class="trip-menu-btn w-8 h-8 flex items-center justify-center rounded-lg hover:bg-space text-slate-400 hover:text-slate-200 transition-all opacity-0 group-hover:opacity-100" data-menu-trip-id="${t.id}" onclick="event.stopPropagation(); showTripMenu(this, '${t.id}')">⋮</button>
+    </div>
+  `).join('');
+
+  // Mobile strip - preserve the add button that's already in HTML
+  const mobileTripsHtml = sortedTrips.map(t => `
+    <div class="trip-chip flex items-center gap-2 px-4 py-2.5 bg-globe-surface border rounded-full cursor-pointer whitespace-nowrap shrink-0 transition-all
+      ${selectedTripId === t.id ? 'border-accent bg-accent/15' : 'border-globe-border hover:border-accent'}"
+      data-trip-id="${t.id}">
+      <div class="w-1.5 h-1.5 rounded-full bg-route-active"></div>
+      <span class="text-sm font-medium">${t.name}</span>
+    </div>
+  `).join('');
+  
+  // Keep the add button, append trips after it
+  const addBtn = tripStrip.querySelector('#add-trip-btn-mobile');
+  tripStrip.innerHTML = '';
+  if (addBtn) tripStrip.appendChild(addBtn.cloneNode(true));
+  tripStrip.insertAdjacentHTML('beforeend', mobileTripsHtml);
+
+  // Attach click handlers for trip selection
+  document.querySelectorAll('[data-trip-id]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      // Don't trigger if clicking on menu button
+      if (e.target.closest('.trip-menu-btn')) return;
+      toggleTrip(el.dataset.tripId);
+    });
+  });
+  
+  // Reattach mobile add button listener
+  const mobileAddBtn = $('add-trip-btn-mobile');
+  if (mobileAddBtn) {
+    mobileAddBtn.addEventListener('click', () => openTripModal());
+  }
+}
+
+function renderDetails(trip) {
+  if (!trip) {
+    $('details-title').textContent = 'Select a trip';
+    $('details-subtitle').textContent = 'Click on a trip to see details';
+    $('details-route').innerHTML = '';
+    $('details-stats').innerHTML = '';
+    bottomSheet.classList.add('hidden');
+    return;
+  }
+
+  // Build route display using mode-aware location display
+  const route = [
+    getLocationDisplay(trip.legs[0].origin, trip.legs[0].mode),
+    ...trip.legs.map(l => getLocationDisplay(l.destination, l.mode))
+  ];
+  const routeHtml = route.map((code, i) => 
+    `<span class="text-accent font-medium">${code}</span>${i < route.length - 1 ? '<span class="text-route-active">&rarr;</span>' : ''}`
+  ).join('');
+
+  const flights = trip.legs.filter(l => l.mode === 'flight').length;
+  const days = getDays(trip.startDate, trip.endDate);
+
+  // Desktop panel
+  $('details-title').textContent = trip.name;
+  $('details-subtitle').textContent = formatDateRange(trip.startDate, trip.endDate);
+  $('details-route').innerHTML = routeHtml;
+  $('details-stats').innerHTML = `
+    <div class="text-center">
+      <div class="text-2xl font-semibold text-route-active">${flights}</div>
+      <div class="text-xs text-slate-400 uppercase tracking-wide">Flights</div>
+    </div>
+    <div class="text-center">
+      <div class="text-2xl font-semibold text-route-active">${days}</div>
+      <div class="text-xs text-slate-400 uppercase tracking-wide">Days</div>
+    </div>
+  `;
+
+  // Mobile bottom sheet
+  $('sheet-title').textContent = trip.name;
+  $('sheet-subtitle').innerHTML = `${formatDateRangeShort(trip.startDate, trip.endDate)} &bull; ${flights} flights`;
+  $('sheet-route').innerHTML = routeHtml;
+  bottomSheet.classList.remove('hidden');
+}
+
+// ========================================================================
+// STATE MANAGEMENT
+// ========================================================================
+
+function toggleTrip(tripId) {
+  // Cancel Year in Review if active
+  if (isYearInReview) {
+    stopYearInReview();
+    // If we're selecting this trip, continue; otherwise just cancel
+    if (!tripId) return;
+  }
+  
+  // Cancel any ongoing trip animation
+  if (isTripAnimating) {
+    stopTripAnimation();
+  }
+  
+  const wasSelected = selectedTripId === tripId;
+  selectedTripId = wasSelected ? null : tripId;
+  renderTripList();
+  
+  const trip = TRIPS.find(t => t.id === selectedTripId);
+  renderDetails(trip);
+  
+  if (trip && !wasSelected) {
+    // Selecting a new trip - play animation
+    playSingleTripAnimation(trip);
+  } else {
+    // Deselecting - just update arcs normally
+    updateArcs();
+    focusOnTrip();
+  }
+}
+
+// ========================================================================
+// CRUD: TRIP MODAL MANAGEMENT
+// ========================================================================
+
+let editingTripId = null;  // null = creating new, string = editing existing
+let modalLegs = [];        // Current legs being edited
+let menuTripId = null;     // Trip ID for overflow menu
+let deletingTripId = null; // Trip ID for delete confirmation
+
+/**
+ * Show the overflow menu for a trip
+ */
+function showTripMenu(button, tripId) {
+  const menu = $('trip-menu');
+  menuTripId = tripId;
+  
+  // Position menu near the button
+  const rect = button.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${rect.left - 100}px`;
+  menu.classList.remove('hidden');
+  
+  // Close menu when clicking outside
+  setTimeout(() => {
+    document.addEventListener('click', closeTripMenu, { once: true });
+  }, 0);
+}
+
+function closeTripMenu() {
+  $('trip-menu').classList.add('hidden');
+  menuTripId = null;
+}
+
+/**
+ * Open the trip modal for adding or editing
+ */
+function openTripModal(tripId = null) {
+  editingTripId = tripId;
+  
+  if (tripId) {
+    // Editing: populate form with existing trip data
+    const trip = TRIPS.find(t => t.id === tripId);
+    if (!trip) return;
+    
+    $('trip-name').value = trip.name;
+    $('trip-start').value = trip.startDate;
+    $('trip-end').value = trip.endDate;
+    modalLegs = trip.legs.map(l => ({
+      // For flights: use code property (airport code)
+      // For other modes: use name property (full city name)
+      origin: l.mode === 'flight' ? getCode(l.origin) : (l.origin?.name || getCode(l.origin)),
+      destination: l.mode === 'flight' ? getCode(l.destination) : (l.destination?.name || getCode(l.destination)),
+      departureDate: l.departureDate || '',
+      mode: l.mode || 'flight'
+    }));
+    $('modal-title').textContent = 'Edit Trip';
+  } else {
+    // Creating: clear form
+    $('trip-name').value = '';
+    $('trip-start').value = '';
+    $('trip-end').value = '';
+    modalLegs = [{ origin: '', destination: '', departureDate: '', mode: 'flight' }];
+    $('modal-title').textContent = 'New Trip';
+  }
+  
+  renderModalLegs();
+  hideModalError();
+  $('trip-modal').classList.remove('hidden');
+  $('trip-name').focus();
+}
+
+/**
+ * Close the trip modal
+ */
+function closeModal() {
+  $('trip-modal').classList.add('hidden');
+  editingTripId = null;
+  modalLegs = [];
+  hideModalError();
+}
+
+/**
+ * Render leg rows in the modal
+ * Renders different inputs based on mode:
+ * - Flight: 3-char uppercase airport code inputs
+ * - Other modes: Free-form city/station name inputs
+ */
+function renderModalLegs() {
+  const container = $('legs-container');
+  container.innerHTML = modalLegs.map((leg, idx) => {
+    const isFlightMode = leg.mode === 'flight';
+    
+    return `
+      <div class="leg-row" data-leg-index="${idx}">
+        <div class="relative">
+          ${isFlightMode 
+            ? `<input type="text" class="leg-origin w-full px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none uppercase" placeholder="JFK" maxlength="3" value="${leg.origin}" data-field="origin">`
+            : `<input type="text" class="leg-origin w-full px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none" placeholder="City or station" value="${leg.origin}" data-field="origin">`
+          }
+        </div>
+        <div class="relative">
+          ${isFlightMode
+            ? `<input type="text" class="leg-dest w-full px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none uppercase" placeholder="LAX" maxlength="3" value="${leg.destination}" data-field="destination">`
+            : `<input type="text" class="leg-dest w-full px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none" placeholder="City or station" value="${leg.destination}" data-field="destination">`
+          }
+        </div>
+        <input type="date" class="leg-date px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none text-slate-100" value="${leg.departureDate}" data-field="departureDate">
+        <select class="leg-mode px-3 py-2 bg-space border border-globe-border rounded-lg text-sm focus:border-accent focus:outline-none" data-field="mode">
+          <option value="flight" ${leg.mode === 'flight' ? 'selected' : ''}>✈️</option>
+          <option value="train" ${leg.mode === 'train' ? 'selected' : ''}>🚂</option>
+          <option value="car" ${leg.mode === 'car' ? 'selected' : ''}>🚗</option>
+          <option value="ferry" ${leg.mode === 'ferry' ? 'selected' : ''}>⛴️</option>
+        </select>
+        <button type="button" class="leg-remove w-8 h-8 flex items-center justify-center rounded-lg hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors ${modalLegs.length <= 1 ? 'opacity-30 pointer-events-none' : ''}" onclick="removeLeg(${idx})">🗑</button>
+      </div>
+    `;
+  }).join('');
+  
+  // Attach event listeners for leg inputs
+  setupLegInputListeners();
+}
+
+/**
+ * Setup event listeners for leg input fields
+ */
+function setupLegInputListeners() {
+  const container = $('legs-container');
+  container.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('change', updateLegFromInput);
+    el.addEventListener('input', updateLegFromInput);
+  });
+}
+
+/**
+ * Update modalLegs when input changes
+ */
+function updateLegFromInput(e) {
+  const row = e.target.closest('.leg-row');
+  const idx = parseInt(row.dataset.legIndex, 10);
+  const field = e.target.dataset.field;
+  
+  if (field && modalLegs[idx]) {
+    let value = e.target.value;
+    
+    // Only uppercase for flight mode origin/destination
+    if ((field === 'origin' || field === 'destination') && modalLegs[idx].mode === 'flight') {
+      value = value.toUpperCase();
+      e.target.value = value;
+    }
+    
+    modalLegs[idx][field] = value;
+    
+    // If mode changed, re-render to update input types
+    if (field === 'mode') {
+      // Re-render inputs to reflect new mode constraints
+      renderModalLegs();
+      
+      // Re-focus on the mode selector
+      const newRow = $('legs-container').querySelector(`[data-leg-index="${idx}"]`);
+      if (newRow) {
+        newRow.querySelector('.leg-mode').focus();
+      }
+    }
+  }
+}
+
+/**
+ * Add a new leg to the modal
+ */
+function addLeg() {
+  // Get previous leg's destination and mode
+  const lastLeg = modalLegs[modalLegs.length - 1];
+  const lastDest = lastLeg ? lastLeg.destination : '';
+  const lastMode = lastLeg ? lastLeg.mode : 'flight';
+  
+  // Pre-fill origin from previous leg's destination, inherit mode
+  modalLegs.push({ 
+    origin: lastDest, 
+    destination: '', 
+    departureDate: '', 
+    mode: lastMode  // Inherit mode from previous leg
+  });
+  renderModalLegs();
+  
+  // Focus the new destination field
+  const container = $('legs-container');
+  const lastRow = container.lastElementChild;
+  if (lastRow) {
+    const destInput = lastRow.querySelector('.leg-dest');
+    if (destInput) destInput.focus();
+  }
+}
+
+/**
+ * Remove a leg from the modal
+ */
+function removeLeg(idx) {
+  if (modalLegs.length <= 1) return;
+  modalLegs.splice(idx, 1);
+  renderModalLegs();
+}
+
+// ========================================================================
+// CRUD: SAVE TRIP
+// ========================================================================
+
+function gatherLegsFromForm() {
+  return modalLegs.filter(leg => leg.origin && leg.destination);
+}
+
+function showModalError(message) {
+  const errorEl = $('modal-error');
+  errorEl.textContent = message;
+  errorEl.classList.remove('hidden');
+}
+
+function hideModalError() {
+  $('modal-error').classList.add('hidden');
+}
+
+function generateTripId(name, startDate) {
+  const year = parseLocalDate(startDate).getFullYear();
+  const slug = name.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  return `${year}-${slug}`;
+}
+
+function saveTrip() {
+  // Gather form data
+  const tripData = {
+    name: $('trip-name').value.trim(),
+    startDate: $('trip-start').value,
+    endDate: $('trip-end').value,
+    legs: gatherLegsFromForm()
+  };
+  
+  // Validate
+  if (!tripData.name) return showModalError('Trip name is required');
+  if (!tripData.startDate) return showModalError('Start date is required');
+  if (!tripData.endDate) return showModalError('End date is required');
+  if (tripData.legs.length === 0) return showModalError('At least one leg with origin and destination is required');
+  
+  // Validate dates
+  if (parseLocalDate(tripData.endDate) < parseLocalDate(tripData.startDate)) {
+    return showModalError('End date must be after start date');
+  }
+  
+  // Show loading state
+  const saveBtn = $('modal-save');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving...';
+  
+  if (editingTripId) {
+    // Update existing
+    google.script.run
+      .withSuccessHandler(onSaveSuccess)
+      .withFailureHandler(onSaveError)
+      .updateTrip(editingTripId, tripData);
+  } else {
+    // Create new (generate ID)
+    tripData.id = generateTripId(tripData.name, tripData.startDate);
+    google.script.run
+      .withSuccessHandler(onSaveSuccess)
+      .withFailureHandler(onSaveError)
+      .createTrip(tripData);
+  }
+}
+
+function onSaveSuccess(result) {
+  const saveBtn = $('modal-save');
+  saveBtn.disabled = false;
+  saveBtn.textContent = 'Save Trip';
+  
+  if (result && result.success) {
+    closeModal();
+    reloadTrips();
+  } else {
+    showModalError((result && result.error) || 'Failed to save trip');
+  }
+}
+
+function onSaveError(error) {
+  const saveBtn = $('modal-save');
+  saveBtn.disabled = false;
+  saveBtn.textContent = 'Save Trip';
+  showModalError(error.message || 'An error occurred while saving');
+}
+
+// ========================================================================
+// CRUD: DELETE TRIP
+// ========================================================================
+
+function confirmDelete(tripId) {
+  deletingTripId = tripId;
+  const trip = TRIPS.find(t => t.id === tripId);
+  if (!trip) return;
+  
+  $('delete-message').textContent = `Are you sure you want to delete "${trip.name}"? This will remove the trip and all ${trip.legs ? trip.legs.length : 0} leg(s) permanently.`;
+  $('delete-modal').classList.remove('hidden');
+}
+
+function closeDeleteModal() {
+  $('delete-modal').classList.add('hidden');
+  deletingTripId = null;
+}
+
+function executeDelete() {
+  if (!deletingTripId) return;
+  
+  const confirmBtn = $('delete-confirm');
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = 'Deleting...';
+  
+  google.script.run
+    .withSuccessHandler(onDeleteSuccess)
+    .withFailureHandler(onDeleteError)
+    .deleteTrip(deletingTripId);
+}
+
+function onDeleteSuccess(result) {
+  const confirmBtn = $('delete-confirm');
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = 'Delete';
+  
+  if (result && result.success) {
+    // If we deleted the selected trip, deselect it
+    if (selectedTripId === deletingTripId) {
+      selectedTripId = null;
+    }
+    
+    closeDeleteModal();
+    reloadTrips();
+  } else {
+    alert((result && result.error) || 'Failed to delete trip');
+  }
+}
+
+function onDeleteError(error) {
+  const confirmBtn = $('delete-confirm');
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = 'Delete';
+  alert(error.message || 'An error occurred while deleting');
+}
+
+// ========================================================================
+// CRUD: EVENT WIRING
+// ========================================================================
+
+function setupCrudEventListeners() {
+  // Add trip button (desktop)
+  const addBtn = $('add-trip-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => openTripModal());
+  }
+  
+  // Add trip button (mobile)
+  const addBtnMobile = $('add-trip-btn-mobile');
+  if (addBtnMobile) {
+    addBtnMobile.addEventListener('click', () => openTripModal());
+  }
+  
+  // Sparkle button - Year in Review toggle
+  const sparkleBtn = $('sparkle-btn');
+  if (sparkleBtn) {
+    sparkleBtn.addEventListener('click', () => {
+      if (isYearInReview) {
+        stopYearInReview();
+      } else {
+        startYearInReview();
+      }
+    });
+  }
+  
+  // Modal close buttons
+  $('modal-close').addEventListener('click', closeModal);
+  $('modal-cancel').addEventListener('click', closeModal);
+  $('modal-backdrop').addEventListener('click', closeModal);
+  
+  // Modal save
+  $('modal-save').addEventListener('click', saveTrip);
+  
+  // Add leg button
+  $('add-leg-btn').addEventListener('click', addLeg);
+  
+  // Overflow menu actions
+  $('menu-edit').addEventListener('click', () => {
+    if (menuTripId) {
+      openTripModal(menuTripId);
+      closeTripMenu();
+    }
+  });
+  
+  $('menu-delete').addEventListener('click', () => {
+    if (menuTripId) {
+      confirmDelete(menuTripId);
+      closeTripMenu();
+    }
+  });
+  
+  // Delete modal
+  $('delete-cancel').addEventListener('click', closeDeleteModal);
+  $('delete-backdrop').addEventListener('click', closeDeleteModal);
+  $('delete-confirm').addEventListener('click', executeDelete);
+}
+
+// ========================================================================
+// KEYBOARD SHORTCUTS
+// ========================================================================
+document.addEventListener('keydown', e => {
+  // Escape - close modals, cancel Year in Review, or deselect trip
+  if (e.key === 'Escape') {
+    if (!$('trip-modal').classList.contains('hidden')) {
+      closeModal();
+      return;
+    }
+    if (!$('delete-modal').classList.contains('hidden')) {
+      closeDeleteModal();
+      return;
+    }
+    if (isYearInReview) {
+      stopYearInReview();
+      return;
+    }
+    if (isTripAnimating) {
+      stopTripAnimation();
+      // Keep trip selected, just stop animation
+      updateArcs();
+      focusOnTrip();
+      return;
+    }
+    if (selectedTripId) {
+      toggleTrip(selectedTripId);
+    }
+  }
+  
+  // Don't trigger shortcuts when typing in inputs
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') {
+    return;
+  }
+  
+  // Space - toggle auto-rotation
+  if (e.key === ' ' && globe) {
+    e.preventDefault();
+    const controls = globe.controls();
+    controls.autoRotate = !controls.autoRotate;
+  }
+  
+  // R - trigger/stop Year in Review
+  if (e.key === 'r' || e.key === 'R') {
+    if (isYearInReview) {
+      stopYearInReview();
+    } else {
+      startYearInReview();
+    }
+  }
+  
+  // N - new trip (when no modal is open)
+  if ((e.key === 'n' || e.key === 'N') && $('trip-modal').classList.contains('hidden')) {
+    openTripModal();
+  }
+});
+</script>
+

@@ -1,0 +1,484 @@
+<script>
+// ========================================================================
+// ARC VISUALIZATION
+// ========================================================================
+
+/**
+ * Get arc color based on selection state and pulse phase
+ */
+function getArcColor(tripId) {
+  if (!selectedTripId) {
+    // Idle state: all arcs normal color
+    return '#f4a261';
+  }
+  if (tripId === selectedTripId) {
+    // Selected: pulsing brightness using sine wave
+    // pulsePhase goes 0 to 2π, sine gives -1 to 1, we map to 0.7 to 1.0 brightness
+    const brightness = 0.85 + 0.15 * Math.sin(pulsePhase);
+    return interpolateColor('#f4a261', '#ffcfa3', brightness);
+  }
+  // Muted: other trips fade
+  return 'rgba(74, 74, 90, 0.3)';
+}
+
+/**
+ * Get arc stroke width based on selection state
+ */
+function getArcStroke(tripId) {
+  if (!selectedTripId) return 1.5;           // Normal width
+  if (tripId === selectedTripId) return 2.5; // Thicker when selected
+  return 0.8;                                 // Thinner when muted
+}
+
+/**
+ * Calculate arc altitude based on distance AND mode.
+ * Flights get high arcs, surface travel gets ground-hugging arcs.
+ */
+function getArcAltitude(distanceKm, mode) {
+  // Surface travel: very low arcs (ground-hugging)
+  if (mode === 'train' || mode === 'car' || mode === 'ferry') {
+    // Slight curve based on distance, but always low
+    if (distanceKm < 100) return 0.002;
+    if (distanceKm < 500) return 0.005;
+    if (distanceKm < 1000) return 0.008;
+    return 0.01;  // Max altitude for long surface trips
+  }
+  
+  // Flights: existing altitude logic
+  if (distanceKm < 500) return 0.02;
+  if (distanceKm < 1000) return 0.04;
+  if (distanceKm < 2000) return 0.08;
+  if (distanceKm < 4000) return 0.12;
+  if (distanceKm < 8000) return 0.18;
+  return 0.25; // Very long flights (e.g., transpacific)
+}
+
+/**
+ * Build arc data from TRIPS for Globe.gl
+ */
+function buildArcData() {
+  const arcs = [];
+  
+  TRIPS.forEach(trip => {
+    if (!trip.legs) return;
+    trip.legs.forEach(leg => {
+      // Handle both object and string formats for origin/destination
+      const originLat = leg.origin?.lat;
+      const originLng = leg.origin?.lng;
+      const destLat = leg.destination?.lat;
+      const destLng = leg.destination?.lng;
+      
+      // Skip if coordinates are missing
+      if (originLat == null || originLng == null || destLat == null || destLng == null) {
+        console.warn(`Skipping leg with missing coordinates:`, leg);
+        return;
+      }
+      
+      const distance = getDistanceKm(originLat, originLng, destLat, destLng);
+      
+      arcs.push({
+        tripId: trip.id,
+        startLat: originLat,
+        startLng: originLng,
+        endLat: destLat,
+        endLng: destLng,
+        distance: distance,
+        altitude: getArcAltitude(distance, leg.mode),
+        color: getArcColor(trip.id),
+        stroke: getArcStroke(trip.id),
+        mode: leg.mode
+      });
+    });
+  });
+  
+  return arcs;
+}
+
+/**
+ * Build arc data for a single trip
+ */
+function buildArcDataForTrip(trip) {
+  const arcs = [];
+  
+  if (!trip.legs) return arcs;
+  
+  trip.legs.forEach(leg => {
+    const originLat = leg.origin?.lat;
+    const originLng = leg.origin?.lng;
+    const destLat = leg.destination?.lat;
+    const destLng = leg.destination?.lng;
+    
+    if (originLat == null || originLng == null || destLat == null || destLng == null) return;
+    
+    const distance = getDistanceKm(originLat, originLng, destLat, destLng);
+    
+    arcs.push({
+      tripId: trip.id,
+      startLat: originLat,
+      startLng: originLng,
+      endLat: destLat,
+      endLng: destLng,
+      distance: distance,
+      altitude: getArcAltitude(distance, leg.mode),
+      color: '#f4a261',
+      stroke: 2,
+      mode: leg.mode
+    });
+  });
+  
+  return arcs;
+}
+
+/**
+ * Initialize arcs layer on the globe with draw-in animation
+ */
+function initArcs() {
+  if (!globe || !TRIPS.length) return;
+  
+  const arcData = buildArcData();
+  
+  // Configure arcs layer - start with invisible arcs
+  globe
+    .arcsData(arcData)
+    .arcStartLat(d => d.startLat)
+    .arcStartLng(d => d.startLng)
+    .arcEndLat(d => d.endLat)
+    .arcEndLng(d => d.endLng)
+    .arcColor(d => d.color)
+    .arcStroke(d => d.stroke)
+    .arcAltitude(d => d.altitude)
+    .arcAltitudeAutoScale(0.5)
+    .arcDashLength(0)           // Start invisible
+    .arcDashGap(2)              // Full gap
+    .arcDashAnimateTime(0)      // No dash movement during draw
+    .arcsTransitionDuration(0); // Instant updates during animation
+  
+  // Click on arc to select trip
+  globe.onArcClick((arc, event) => {
+    if (isYearInReview) {
+      stopYearInReview();
+      return;
+    }
+    if (arc && arc.tripId) {
+      toggleTrip(arc.tripId);
+    }
+  });
+  
+  // Click on empty globe space to deselect
+  globe.onGlobeClick(() => {
+    if (isYearInReview) {
+      stopYearInReview();
+      return;
+    }
+    if (selectedTripId) {
+      toggleTrip(selectedTripId);
+    }
+  });
+  
+  console.log(`Rendering ${arcData.length} arcs with draw-in animation`);
+  
+  // Animate arcs drawing in over 2 seconds
+  animateDrawIn(2000, () => {
+    // Animation complete - set to solid arcs
+    globe
+      .arcDashLength(1)
+      .arcDashGap(0)
+      .arcsTransitionDuration(300);
+    console.log('Draw-in animation complete');
+  });
+}
+
+/**
+ * Animate arcs drawing in from 0 to full length
+ * @param {number} duration - Animation duration in ms
+ * @param {Function} onComplete - Callback when complete
+ */
+function animateDrawIn(duration, onComplete) {
+  const startTime = performance.now();
+  drawProgress = 0;
+  
+  function tick(now) {
+    const elapsed = now - startTime;
+    drawProgress = Math.min(elapsed / duration, 1);
+    
+    // Ease-out cubic for smoother feel
+    const eased = 1 - Math.pow(1 - drawProgress, 3);
+    
+    globe.arcDashLength(eased);
+    globe.arcDashGap(2 * (1 - eased));
+    
+    if (drawProgress < 1) {
+      requestAnimationFrame(tick);
+    } else {
+      if (onComplete) onComplete();
+    }
+  }
+  
+  requestAnimationFrame(tick);
+}
+
+/**
+ * Update arcs when selection changes
+ */
+function updateArcs() {
+  if (!globe) return;
+  
+  // Rebuild arc data with new colors/strokes
+  globe.arcsData(buildArcData());
+  
+  // Start or stop pulse animation based on selection
+  if (selectedTripId) {
+    startPulseAnimation();
+  } else {
+    stopPulseAnimation();
+  }
+}
+
+/**
+ * Start the pulse animation for selected trip arcs
+ */
+function startPulseAnimation() {
+  // Don't start if already running
+  if (pulseAnimationId) return;
+  
+  // Disable transition for smooth pulsing
+  globe.arcsTransitionDuration(0);
+  
+  const pulseSpeed = 0.04; // Radians per frame (~2.5 second cycle)
+  
+  function animate() {
+    pulsePhase += pulseSpeed;
+    if (pulsePhase > Math.PI * 2) pulsePhase -= Math.PI * 2;
+    
+    // Update arc colors with new pulse phase
+    if (globe && selectedTripId) {
+      globe.arcsData(buildArcData());
+    }
+    
+    pulseAnimationId = requestAnimationFrame(animate);
+  }
+  
+  pulseAnimationId = requestAnimationFrame(animate);
+}
+
+/**
+ * Stop the pulse animation
+ */
+function stopPulseAnimation() {
+  if (pulseAnimationId) {
+    cancelAnimationFrame(pulseAnimationId);
+    pulseAnimationId = null;
+  }
+  pulsePhase = 0;
+  
+  // Restore transition for smooth selection changes
+  if (globe) {
+    globe.arcsTransitionDuration(300);
+  }
+}
+
+// ========================================================================
+// CAMERA CONTROLS
+// ========================================================================
+
+/**
+ * Calculate center point of an array of lat/lng points
+ */
+function calculateCenter(points) {
+  const lat = points.reduce((sum, p) => sum + p.lat, 0) / points.length;
+  const lng = points.reduce((sum, p) => sum + p.lng, 0) / points.length;
+  return { lat, lng };
+}
+
+/**
+ * Calculate appropriate altitude (zoom level) based on point spread
+ */
+function calculateAltitude(points) {
+  const lats = points.map(p => p.lat);
+  const lngs = points.map(p => p.lng);
+  const latSpread = Math.max(...lats) - Math.min(...lats);
+  const lngSpread = Math.max(...lngs) - Math.min(...lngs);
+  const maxSpread = Math.max(latSpread, lngSpread);
+  
+  // Map spread to altitude
+  if (maxSpread < 20) return 1.2;      // Close zoom for short trips
+  if (maxSpread < 50) return 1.8;      // Medium
+  if (maxSpread < 100) return 2.2;     // Wider
+  return 2.8;                           // Very spread out
+}
+
+/**
+ * Animate camera to focus on selected trip
+ */
+function focusOnTrip() {
+  if (!globe) return;
+  
+  if (!selectedTripId) {
+    // Reset to default view
+    globe.pointOfView({ lat: 20, lng: -40, altitude: 2.5 }, 800);
+    return;
+  }
+  
+  const trip = TRIPS.find(t => t.id === selectedTripId);
+  if (!trip || !trip.legs || !trip.legs.length) return;
+  
+  // Collect all points from legs
+  const points = [];
+  trip.legs.forEach(leg => {
+    if (leg.origin?.lat != null && leg.origin?.lng != null) {
+      points.push({ lat: leg.origin.lat, lng: leg.origin.lng });
+    }
+    if (leg.destination?.lat != null && leg.destination?.lng != null) {
+      points.push({ lat: leg.destination.lat, lng: leg.destination.lng });
+    }
+  });
+  
+  if (points.length === 0) return;
+  
+  const center = calculateCenter(points);
+  const altitude = calculateAltitude(points);
+  
+  globe.pointOfView({ 
+    lat: center.lat, 
+    lng: center.lng, 
+    altitude: altitude 
+  }, 800); // 800ms transition
+}
+
+/**
+ * Focus camera on a trip by its ID
+ */
+function focusOnTripById(tripId) {
+  const trip = TRIPS.find(t => t.id === tripId);
+  if (!trip || !trip.legs || !trip.legs.length) return;
+  
+  const points = [];
+  trip.legs.forEach(leg => {
+    if (leg.origin?.lat != null) points.push({ lat: leg.origin.lat, lng: leg.origin.lng });
+    if (leg.destination?.lat != null) points.push({ lat: leg.destination.lat, lng: leg.destination.lng });
+  });
+  
+  if (points.length === 0) return;
+  
+  const center = calculateCenter(points);
+  const altitude = calculateAltitude(points);
+  
+  globe.pointOfView({ lat: center.lat, lng: center.lng, altitude }, 800);
+}
+
+// ========================================================================
+// GLOBE INITIALIZATION
+// ========================================================================
+
+// CDN base URL (constructed to avoid Apps Script stripping)
+var CDN_BASE = ['https:', String.fromCharCode(47,47), 'unpkg.com/three-globe/example/img/'].join('');
+
+/**
+ * Initialize the 3D globe with Globe.gl
+ * @param {Function} onReady - Callback when globe is ready
+ */
+function initGlobe(onReady) {
+  // Create globe instance with dark theme
+  globe = Globe()(globeContainer)
+    .globeImageUrl(CDN_BASE + 'earth-night.jpg')
+    .bumpImageUrl(CDN_BASE + 'earth-topology.png')
+    .backgroundImageUrl(null)
+    .showAtmosphere(true)
+    .atmosphereColor('#4a6fa5')
+    .atmosphereAltitude(0.2)
+    .width(globeContainer.clientWidth)
+    .height(globeContainer.clientHeight);
+
+  // Configure camera controls
+  const controls = globe.controls();
+  controls.enableZoom = true;
+  controls.enablePan = false;        // Keep globe centered
+  controls.minDistance = 150;        // Min zoom (closer)
+  controls.maxDistance = 500;        // Max zoom (further)
+  controls.enableDamping = true;     // Smooth deceleration
+  controls.dampingFactor = 0.1;
+  controls.autoRotate = true;        // Auto-rotate when idle
+  controls.autoRotateSpeed = 0.5;    // Slow rotation
+
+  // Set initial camera position
+  globe.pointOfView({ lat: 20, lng: -40, altitude: 2.5 }, 0);
+
+  // Handle user interaction - pause auto-rotation temporarily
+  setupIdleRotation();
+
+  // Handle window resize
+  window.addEventListener('resize', resizeGlobe);
+
+  // Expose globe instance globally for other modules
+  window.travelGlobe = globe;
+
+  // Signal globe is ready - use callback + fallback timeout
+  let readyCalled = false;
+  const signalReady = () => {
+    if (readyCalled) return;
+    readyCalled = true;
+    console.log('Globe ready');
+    if (onReady) onReady();
+  };
+
+  // Try onGlobeReady callback
+  globe.onGlobeReady(signalReady);
+  
+  // Fallback: if onGlobeReady doesn't fire within 3s, proceed anyway
+  setTimeout(signalReady, 3000);
+}
+
+/**
+ * Resize globe to fit container
+ */
+function resizeGlobe() {
+  if (!globe) return;
+  globe.width(globeContainer.clientWidth);
+  globe.height(globeContainer.clientHeight);
+}
+
+/**
+ * Setup idle rotation behavior:
+ * - Pause auto-rotation during user interaction
+ * - Resume after a period of inactivity
+ * - Cancel Year in Review on significant interaction
+ */
+function setupIdleRotation() {
+  if (!globe) return;
+  const controls = globe.controls();
+
+  // Events that indicate user interaction
+  const interactionEvents = ['mousedown', 'touchstart', 'wheel'];
+  
+  interactionEvents.forEach(event => {
+    globeContainer.addEventListener(event, (e) => {
+      // Cancel Year in Review on drag/zoom (not on simple click)
+      if (isYearInReview && (event === 'wheel' || e.type === 'touchstart')) {
+        stopYearInReview();
+      }
+      
+      // Pause auto-rotation
+      controls.autoRotate = false;
+      
+      // Clear any existing timeout
+      if (idleTimeout) clearTimeout(idleTimeout);
+      
+      // Schedule resume of auto-rotation
+      idleTimeout = setTimeout(() => {
+        controls.autoRotate = true;
+      }, IDLE_RESUME_DELAY);
+    }, { passive: true });
+  });
+  
+  // Also cancel Year in Review on mousemove during drag
+  let isDragging = false;
+  globeContainer.addEventListener('mousedown', () => { isDragging = true; }, { passive: true });
+  globeContainer.addEventListener('mouseup', () => { isDragging = false; }, { passive: true });
+  globeContainer.addEventListener('mousemove', () => {
+    if (isDragging && isYearInReview) {
+      stopYearInReview();
+    }
+  }, { passive: true });
+}
+</script>
+

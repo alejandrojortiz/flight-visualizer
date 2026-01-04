@@ -1,0 +1,836 @@
+<script>
+// ========================================================================
+// YEAR IN REVIEW ANIMATION
+// ========================================================================
+
+/**
+ * Start Year in Review playback mode
+ */
+function startYearInReview() {
+  if (isYearInReview) return; // Already running
+  if (!globe || !TRIPS.length) return;
+  
+  isYearInReview = true;
+  
+  // Disable trip selection during playback
+  selectedTripId = null;
+  renderTripList();
+  
+  // Stop any existing animations
+  stopPulseAnimation();
+  
+  // Stop auto-rotation during animation (less jarring)
+  const controls = globe.controls();
+  if (controls) {
+    controls.autoRotate = false;
+    if (idleTimeout) clearTimeout(idleTimeout);
+  }
+  
+  // Visual feedback
+  $('sparkle-btn').classList.add('animate-pulse-glow', 'border-accent');
+  $('details-title').textContent = '✨ Year in Review';
+  $('details-subtitle').textContent = 'Relive your travels...';
+  $('details-route').innerHTML = '';
+  $('details-stats').innerHTML = '';
+  
+  // Reset camera
+  globe.pointOfView({ lat: 20, lng: -40, altitude: 2.5 }, 800);
+  
+  // Start sequence after camera settles
+  setTimeout(() => {
+    if (isYearInReview) {
+      playTripSequence();
+    }
+  }, 900);
+}
+
+/**
+ * Stop Year in Review and restore normal state
+ */
+function stopYearInReview() {
+  isYearInReview = false;
+  yearInReviewArcs = [];
+  
+  // Remove visual feedback
+  $('sparkle-btn').classList.remove('animate-pulse-glow', 'border-accent');
+  
+  // Hide map overlay if visible
+  const overlay = $('map-overlay');
+  if (overlay) {
+    overlay.classList.remove('visible', 'zooming-out');
+  }
+  
+  // Clear traveling indicator and restore globe state
+  if (globe) {
+    globe.pointsData([]);
+    
+    // Restore all arcs
+    globe
+      .arcsData(buildArcData())
+      .arcDashLength(1)
+      .arcDashGap(0)
+      .arcsTransitionDuration(300);
+    
+    // Resume auto-rotation
+    const controls = globe.controls();
+    if (controls) {
+      controls.autoRotate = true;
+    }
+  }
+  
+  // Reset details panel
+  renderDetails(null);
+}
+
+/**
+ * Stop single trip animation
+ */
+function stopTripAnimation() {
+  isTripAnimating = false;
+  tripAnimationArcs = [];
+  
+  // Hide map overlay if visible
+  const overlay = $('map-overlay');
+  if (overlay) {
+    overlay.classList.remove('visible', 'zooming-out');
+  }
+  
+  // Clear traveling indicator and restore globe state
+  if (globe) {
+    globe.pointsData([]);
+    globe.arcsTransitionDuration(300);
+    
+    // Resume auto-rotation
+    const controls = globe.controls();
+    if (controls) controls.autoRotate = true;
+  }
+}
+
+/**
+ * Play animation for a single selected trip
+ */
+async function playSingleTripAnimation(trip) {
+  if (!trip || !globe) return;
+  
+  isTripAnimating = true;
+  tripAnimationArcs = [];
+  
+  // Stop auto-rotation during animation
+  const controls = globe.controls();
+  if (controls) controls.autoRotate = false;
+  
+  // Mute all other trips first - set them with muted color
+  const allArcs = buildArcData();
+  const otherArcs = allArcs
+    .filter(a => a.tripId !== trip.id)
+    .map(a => ({ ...a, color: 'rgba(74, 74, 90, 0.3)' })); // Muted color
+  
+  // Instant updates during animation
+  globe.arcsTransitionDuration(0);
+  globe.arcsData(otherArcs);
+  globe.arcDashLength(1).arcDashGap(0);
+  
+  // Get arcs for this trip only
+  const tripArcs = buildArcDataForTrip(trip);
+  
+  // Group consecutive legs by whether they use map overlay
+  let i = 0;
+  while (i < tripArcs.length) {
+    if (!isTripAnimating) break;
+    
+    const arc = tripArcs[i];
+    const leg = trip.legs[i];
+    
+    // Check if this leg should use 2D map overlay
+    if (shouldUseMapOverlay(arc, leg)) {
+      // Find all consecutive map-worthy legs starting from i
+      const mapLegsGroup = [];
+      let j = i;
+      while (j < tripArcs.length && shouldUseMapOverlay(tripArcs[j], trip.legs[j])) {
+        mapLegsGroup.push({ arc: tripArcs[j], leg: trip.legs[j], index: j });
+        j++;
+      }
+      
+      // Animate the entire group on the map
+      await animateMapLegGroupForTrip(mapLegsGroup, trip, otherArcs);
+      
+      i = j;
+    } else {
+      // Use globe for flights and long legs
+      await focusOnLeg(arc, leg);
+      
+      // Update route display to highlight current leg
+      updateRouteHighlight(trip, i);
+      
+      // Add this arc to accumulated arcs (along with muted other arcs)
+      tripAnimationArcs.push(arc);
+      globe.arcsData([...otherArcs, ...tripAnimationArcs]);
+      
+      // Animation duration scales with distance
+      const animDuration = Math.max(800, Math.min(2000, arc.distance * 0.5 + 600));
+      
+      // Animate traveling dot along the arc
+      await animateTravelIndicator(arc, animDuration);
+      
+      await sleep(300);
+      i++;
+    }
+  }
+  
+  // Animation complete - show final state
+  if (isTripAnimating) {
+    // Restore normal arc display with proper colors
+    globe.arcsTransitionDuration(300);
+    globe.arcsData(buildArcData()); // Rebuild with correct selection colors
+    focusOnTrip(); // Zoom to show entire trip
+    
+    // Resume auto-rotation
+    if (controls) controls.autoRotate = true;
+  }
+  
+  isTripAnimating = false;
+}
+
+/**
+ * Animate map leg group for single trip animation
+ */
+async function animateMapLegGroupForTrip(legsGroup, trip, otherArcs) {
+  if (!legsGroup.length || !isTripAnimating) return;
+  
+  const firstLeg = legsGroup[0];
+  
+  // Zoom globe in toward the first leg's location
+  const centerLat = (firstLeg.arc.startLat + firstLeg.arc.endLat) / 2;
+  const centerLng = (firstLeg.arc.startLng + firstLeg.arc.endLng) / 2;
+  globe.pointOfView({ lat: centerLat, lng: centerLng, altitude: 0.3 }, 600);
+  await sleep(500);
+  
+  // Show map overlay once for the entire group
+  await showMapOverlay(firstLeg.arc, firstLeg.leg);
+  
+  // Animate each leg in the group
+  for (const { arc, leg, index } of legsGroup) {
+    if (!isTripAnimating) break;
+    
+    // Update route highlight
+    updateRouteHighlight(trip, index);
+    
+    // Add arc to accumulated arcs
+    tripAnimationArcs.push(arc);
+    globe.arcsData([...otherArcs, ...tripAnimationArcs]);
+    
+    // Pan map to this leg (if not the first)
+    if (arc !== firstLeg.arc) {
+      await panMapToLeg(arc, leg);
+    }
+    
+    // Animate route on the 2D map
+    const animDuration = Math.max(1000, Math.min(2500, arc.distance * 3 + 800));
+    await animateRouteOnMap(arc, animDuration);
+    
+    await sleep(200);
+  }
+  
+  // Transition back to globe after entire group is done
+  await hideMapOverlay();
+}
+
+/**
+ * Play through all trips sequentially in date order
+ */
+async function playTripSequence() {
+  // Sort trips by start date
+  const sortedTrips = [...TRIPS].sort((a, b) => 
+    parseLocalDate(a.startDate) - parseLocalDate(b.startDate)
+  );
+  
+  // Fade all arcs to invisible
+  yearInReviewArcs = [];
+  globe.arcsData([]);
+  globe.arcDashLength(1).arcDashGap(0);
+  await sleep(300);
+  
+  // Play each trip
+  for (const trip of sortedTrips) {
+    if (!isYearInReview) break; // Cancelled
+    
+    await playTripAnimation(trip);
+    await sleep(600); // Pause between trips
+  }
+  
+  // Finish: restore all arcs with draw-in
+  if (isYearInReview) {
+    // Show completion message
+    $('details-subtitle').textContent = 'Journey complete!';
+    await sleep(800);
+    
+    // Animate all arcs back in
+    globe.arcsData(buildArcData());
+    globe.arcDashLength(0).arcDashGap(2);
+    
+    await new Promise(resolve => {
+      animateDrawIn(1500, resolve);
+    });
+    
+    globe.arcDashLength(1).arcDashGap(0).arcsTransitionDuration(300);
+    
+    // End Year in Review mode
+    isYearInReview = false;
+    yearInReviewArcs = [];
+    $('sparkle-btn').classList.remove('animate-pulse-glow', 'border-accent');
+    renderDetails(null);
+    
+    // Resume auto-rotation
+    const controls = globe.controls();
+    if (controls) {
+      controls.autoRotate = true;
+    }
+  }
+}
+
+/**
+ * Animate a single trip during Year in Review
+ */
+async function playTripAnimation(trip) {
+  if (!isYearInReview) return;
+  
+  // Update details panel with current trip
+  $('details-title').textContent = trip.name;
+  $('details-subtitle').textContent = formatDateRange(trip.startDate, trip.endDate);
+  
+  // Build route display using mode-aware display
+  if (trip.legs && trip.legs.length > 0) {
+    const route = [
+      getLocationDisplay(trip.legs[0].origin, trip.legs[0].mode),
+      ...trip.legs.map(l => getLocationDisplay(l.destination, l.mode))
+    ];
+    $('details-route').innerHTML = route.map((code, i) => 
+      `<span class="text-accent font-medium">${code}</span>${i < route.length - 1 ? '<span class="text-route-active">→</span>' : ''}`
+    ).join('');
+  }
+  
+  // Get arcs for this trip only
+  const tripArcs = buildArcDataForTrip(trip);
+  
+  // Group consecutive legs by whether they use map overlay
+  let i = 0;
+  while (i < tripArcs.length) {
+    if (!isYearInReview) return;
+    
+    const arc = tripArcs[i];
+    const leg = trip.legs[i];
+    
+    // Check if this leg should use 2D map overlay
+    if (shouldUseMapOverlay(arc, leg)) {
+      // Find all consecutive map-worthy legs starting from i
+      const mapLegsGroup = [];
+      let j = i;
+      while (j < tripArcs.length && shouldUseMapOverlay(tripArcs[j], trip.legs[j])) {
+        mapLegsGroup.push({ arc: tripArcs[j], leg: trip.legs[j], index: j });
+        j++;
+      }
+      
+      // Animate the entire group on the map without returning to globe
+      await animateMapLegGroup(mapLegsGroup, trip);
+      
+      i = j; // Skip past all the legs we just animated
+    } else {
+      // Use globe for flights and long legs
+      // Focus camera on this specific leg (zooms based on distance)
+      await focusOnLeg(arc, leg);
+      
+      // Update route display to highlight current leg
+      updateRouteHighlight(trip, i);
+      
+      // Add this arc to accumulated arcs
+      yearInReviewArcs.push(arc);
+      globe.arcsData([...yearInReviewArcs]);
+      
+      // Animation duration scales with distance (min 800ms, max 2000ms)
+      const animDuration = Math.max(800, Math.min(2000, arc.distance * 0.5 + 600));
+      
+      // Animate traveling dot along the arc
+      await animateTravelIndicator(arc, animDuration);
+      
+      // Brief pause after leg
+      await sleep(300);
+      
+      i++;
+    }
+  }
+  
+  // Highlight trip in sidebar briefly
+  highlightTripInList(trip.id);
+}
+
+/**
+ * Animate a group of consecutive short/ground legs on the 2D map
+ * Stays in map view for the entire group, only transitioning once
+ */
+async function animateMapLegGroup(legsGroup, trip) {
+  if (!legsGroup.length || !isYearInReview) return;
+  
+  const firstLeg = legsGroup[0];
+  
+  // Zoom globe in toward the first leg's location
+  const centerLat = (firstLeg.arc.startLat + firstLeg.arc.endLat) / 2;
+  const centerLng = (firstLeg.arc.startLng + firstLeg.arc.endLng) / 2;
+  globe.pointOfView({ lat: centerLat, lng: centerLng, altitude: 0.3 }, 600);
+  await sleep(500);
+  
+  // Show map overlay once for the entire group
+  await showMapOverlay(firstLeg.arc, firstLeg.leg);
+  
+  // Animate each leg in the group
+  for (const { arc, leg, index } of legsGroup) {
+    if (!isYearInReview) break;
+    
+    // Update route highlight
+    updateRouteHighlight(trip, index);
+    
+    // Add arc to accumulated arcs
+    yearInReviewArcs.push(arc);
+    globe.arcsData([...yearInReviewArcs]);
+    
+    // Pan map to this leg (if not the first)
+    if (arc !== firstLeg.arc) {
+      await panMapToLeg(arc, leg);
+    }
+    
+    // Animate route on the 2D map
+    const animDuration = Math.max(1000, Math.min(2500, arc.distance * 3 + 800));
+    await animateRouteOnMap(arc, animDuration);
+    
+    // Brief pause between legs in the group
+    await sleep(200);
+  }
+  
+  // Transition back to globe after entire group is done
+  await hideMapOverlay();
+}
+
+/**
+ * Pan the Leaflet map to show a new leg (used when staying in map view)
+ */
+async function panMapToLeg(arc, leg) {
+  if (!leafletMap) return;
+  
+  // Clear previous route and markers (except tile layer)
+  leafletMap.eachLayer(layer => {
+    if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+      leafletMap.removeLayer(layer);
+    }
+  });
+  
+  // Calculate bounds for this leg
+  const bounds = L.latLngBounds(
+    [arc.startLat, arc.startLng],
+    [arc.endLat, arc.endLng]
+  );
+  
+  // Animate pan/zoom to new bounds
+  leafletMap.flyToBounds(bounds, { 
+    padding: [80, 80],
+    maxZoom: 14,
+    duration: 0.8
+  });
+  
+  await sleep(850);
+  
+  // Add new route line
+  const routeCoords = [[arc.startLat, arc.startLng], [arc.endLat, arc.endLng]];
+  mapRouteLayer = L.polyline(routeCoords, {
+    color: '#f4a261',
+    weight: 4,
+    opacity: 0.9,
+    dashArray: '0, 1000'
+  }).addTo(leafletMap);
+  
+  // Add origin label
+  const originName = getLocationDisplay(leg?.origin, leg?.mode) || 'Origin';
+  L.marker([arc.startLat, arc.startLng], {
+    icon: L.divIcon({
+      className: 'map-label origin',
+      html: originName,
+      iconSize: null
+    })
+  }).addTo(leafletMap);
+  
+  // Add destination label
+  const destName = getLocationDisplay(leg?.destination, leg?.mode) || 'Destination';
+  L.marker([arc.endLat, arc.endLng], {
+    icon: L.divIcon({
+      className: 'map-label destination',
+      html: destName,
+      iconSize: null
+    })
+  }).addTo(leafletMap);
+}
+
+/**
+ * Update route display to highlight current leg
+ */
+function updateRouteHighlight(trip, currentLegIndex) {
+  if (!trip.legs || trip.legs.length === 0) return;
+  
+  const route = [
+    getLocationDisplay(trip.legs[0].origin, trip.legs[0].mode),
+    ...trip.legs.map(l => getLocationDisplay(l.destination, l.mode))
+  ];
+  
+  $('details-route').innerHTML = route.map((code, i) => {
+    // Highlight origin and destination of current leg
+    const isCurrentOrigin = i === currentLegIndex;
+    const isCurrentDest = i === currentLegIndex + 1;
+    const isCurrent = isCurrentOrigin || isCurrentDest;
+    
+    const colorClass = isCurrent ? 'text-route-active font-semibold' : 'text-accent/60 font-medium';
+    const arrow = i < route.length - 1 
+      ? `<span class="${i === currentLegIndex ? 'text-route-active' : 'text-slate-500'}">→</span>` 
+      : '';
+    
+    return `<span class="${colorClass}">${code}</span>${arrow}`;
+  }).join('');
+}
+
+/**
+ * Focus camera on a single leg with distance-appropriate zoom
+ */
+async function focusOnLeg(arc, leg) {
+  // Calculate center point of the leg
+  const centerLat = (arc.startLat + arc.endLat) / 2;
+  const centerLng = (arc.startLng + arc.endLng) / 2;
+  
+  // Calculate altitude based on distance - closer for short legs
+  const altitude = calculateLegAltitude(arc.distance, leg?.mode);
+  
+  // Camera transition time scales with distance
+  const transitionTime = Math.max(500, Math.min(1000, arc.distance * 0.1 + 400));
+  
+  globe.pointOfView({ lat: centerLat, lng: centerLng, altitude }, transitionTime);
+  
+  // Wait for camera to settle
+  await sleep(transitionTime + 200);
+}
+
+/**
+ * Calculate camera altitude for focusing on a leg based on distance
+ * Returns much closer zoom for short distances
+ */
+function calculateLegAltitude(distanceKm, mode) {
+  // Surface travel (car/train/ferry) - zoom in extra close
+  if (mode === 'train' || mode === 'car' || mode === 'ferry') {
+    if (distanceKm < 30) return 0.15;      // Very short: extremely close
+    if (distanceKm < 50) return 0.2;       // Short city-to-city
+    if (distanceKm < 100) return 0.3;      // Regional
+    if (distanceKm < 200) return 0.5;      // Longer regional
+    if (distanceKm < 500) return 0.8;      // Cross-region
+    return 1.0;                             // Very long surface travel
+  }
+  
+  // Flights - more traditional zoom levels
+  if (distanceKm < 300) return 0.6;        // Very short flight
+  if (distanceKm < 800) return 0.9;        // Short regional
+  if (distanceKm < 1500) return 1.2;       // Regional
+  if (distanceKm < 3000) return 1.6;       // Medium distance
+  if (distanceKm < 6000) return 2.0;       // Long haul
+  return 2.5;                               // Ultra long haul
+}
+
+/**
+ * Animate a traveling indicator dot along an arc
+ */
+function animateTravelIndicator(arc, duration) {
+  return new Promise(resolve => {
+    const startTime = performance.now();
+    
+    // Check if animation should run (Year in Review OR single trip animation)
+    const isAnimating = () => isYearInReview || isTripAnimating;
+    
+    // Calculate point size based on distance - larger for short legs (closer zoom)
+    const pointSize = arc.distance < 100 ? 0.15 
+                    : arc.distance < 300 ? 0.2 
+                    : arc.distance < 1000 ? 0.3 
+                    : 0.4;
+    
+    function tick(now) {
+      if (!isAnimating()) {
+        globe.pointsData([]);
+        resolve();
+        return;
+      }
+      
+      const t = Math.min((now - startTime) / duration, 1);
+      
+      // Ease-in-out for smoother travel feel
+      const eased = t < 0.5 
+        ? 2 * t * t 
+        : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      
+      // Interpolate position along great circle (simple linear for now)
+      const lat = arc.startLat + (arc.endLat - arc.startLat) * eased;
+      const lng = arc.startLng + (arc.endLng - arc.startLng) * eased;
+      
+      // Calculate altitude along arc (parabolic) - flatter for surface travel
+      const isGround = arc.mode === 'train' || arc.mode === 'car' || arc.mode === 'ferry';
+      const arcHeight = isGround ? arc.altitude * 20 : arc.altitude * 100;
+      const altitude = arcHeight * 4 * eased * (1 - eased); // Parabola peaking at t=0.5
+      
+      globe
+        .pointsData([{ lat, lng, altitude }])
+        .pointColor(() => '#f4a261')
+        .pointAltitude(d => d.altitude)
+        .pointRadius(pointSize)
+        .pointsMerge(false);
+      
+      if (t < 1 && isAnimating()) {
+        requestAnimationFrame(tick);
+      } else {
+        globe.pointsData([]); // Remove indicator
+        resolve();
+      }
+    }
+    
+    requestAnimationFrame(tick);
+  });
+}
+
+/**
+ * Briefly highlight a trip in the sidebar list
+ */
+function highlightTripInList(tripId) {
+  const tripItem = document.querySelector(`[data-trip-id="${tripId}"]`);
+  if (tripItem) {
+    tripItem.classList.add('border-accent', 'bg-accent/20');
+    setTimeout(() => {
+      tripItem.classList.remove('border-accent', 'bg-accent/20');
+    }, 600);
+  }
+}
+
+// ========================================================================
+// 2D MAP OVERLAY FOR SHORT LEGS
+// ========================================================================
+
+/**
+ * Initialize the Leaflet map (lazy - only when first needed)
+ */
+function initLeafletMap() {
+  if (leafletMap) return; // Already initialized
+  
+  // Check if Leaflet is loaded
+  if (typeof L === 'undefined') return;
+  
+  const mapContainer = $('leaflet-map');
+  if (!mapContainer) return;
+  
+  // Create map with dark theme
+  leafletMap = L.map(mapContainer, {
+    zoomControl: false,
+    attributionControl: false,
+    dragging: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    touchZoom: false
+  });
+  
+  // Build tile URL dynamically to avoid Apps Script stripping curly braces
+  // CartoDB Dark Matter tiles for dark theme
+  var LB = String.fromCharCode(123); // {
+  var RB = String.fromCharCode(125); // }
+  var tileUrl = 'https:/' + '/' + LB + 's' + RB + '.basemaps.cartocdn.com/dark_all/' +
+                LB + 'z' + RB + '/' + LB + 'x' + RB + '/' + LB + 'y' + RB + LB + 'r' + RB + '.png';
+  
+  L.tileLayer(tileUrl, {
+    maxZoom: 19
+  }).addTo(leafletMap);
+}
+
+/**
+ * Check if a leg should use the 2D map overlay
+ */
+function shouldUseMapOverlay(arc, leg) {
+  // Use map for short legs or ground transportation
+  const isShort = arc.distance < SHORT_LEG_THRESHOLD;
+  const isGround = leg?.mode === 'car' || leg?.mode === 'train' || leg?.mode === 'ferry';
+  return isShort || isGround;
+}
+
+/**
+ * Show the 2D map overlay with zoom-in transition
+ * @param {Object} arc - Arc data with start/end coordinates
+ * @param {Object} leg - Leg data with origin/destination info
+ * @returns {Promise} Resolves when transition is complete
+ */
+async function showMapOverlay(arc, leg) {
+  // Initialize map if needed
+  initLeafletMap();
+  if (!leafletMap) return;
+  
+  const overlay = $('map-overlay');
+  if (!overlay) return;
+  
+  // Calculate bounds with padding
+  const bounds = L.latLngBounds(
+    [arc.startLat, arc.startLng],
+    [arc.endLat, arc.endLng]
+  );
+  
+  // Fit map to bounds
+  leafletMap.fitBounds(bounds, { 
+    padding: [80, 80],
+    maxZoom: 14,
+    animate: false
+  });
+  
+  // Clear previous layers
+  if (mapRouteLayer) {
+    leafletMap.removeLayer(mapRouteLayer);
+    mapRouteLayer = null;
+  }
+  if (mapMarkerLayer) {
+    leafletMap.removeLayer(mapMarkerLayer);
+    mapMarkerLayer = null;
+  }
+  
+  // Add route line (initially hidden, will be drawn)
+  const routeCoords = [[arc.startLat, arc.startLng], [arc.endLat, arc.endLng]];
+  mapRouteLayer = L.polyline(routeCoords, {
+    color: '#f4a261',
+    weight: 4,
+    opacity: 0.9,
+    dashArray: '0, 1000' // Start hidden
+  }).addTo(leafletMap);
+  
+  // Add origin label
+  const originName = getLocationDisplay(leg?.origin, leg?.mode) || 'Origin';
+  L.marker([arc.startLat, arc.startLng], {
+    icon: L.divIcon({
+      className: 'map-label origin',
+      html: originName,
+      iconSize: null
+    })
+  }).addTo(leafletMap);
+  
+  // Add destination label
+  const destName = getLocationDisplay(leg?.destination, leg?.mode) || 'Destination';
+  L.marker([arc.endLat, arc.endLng], {
+    icon: L.divIcon({
+      className: 'map-label destination',
+      html: destName,
+      iconSize: null
+    })
+  }).addTo(leafletMap);
+  
+  // Show overlay with zoom-in transition
+  overlay.classList.remove('zooming-out');
+  overlay.classList.add('visible');
+  
+  // Force Leaflet to recalculate size now that container is visible
+  setTimeout(() => {
+    if (leafletMap) leafletMap.invalidateSize();
+  }, 50);
+  
+  // Wait for CSS transition
+  await sleep(450);
+}
+
+/**
+ * Animate the route on the 2D map with traveling marker
+ * @param {Object} arc - Arc data
+ * @param {number} duration - Animation duration in ms
+ * @returns {Promise} Resolves when animation is complete
+ */
+function animateRouteOnMap(arc, duration) {
+  return new Promise(resolve => {
+    if (!leafletMap || !mapRouteLayer) {
+      resolve();
+      return;
+    }
+    
+    // Check if animation should run (Year in Review OR single trip animation)
+    const isAnimating = () => isYearInReview || isTripAnimating;
+    
+    if (!isAnimating()) {
+      resolve();
+      return;
+    }
+    
+    const startTime = performance.now();
+    const totalLength = arc.distance * 30; // Approximate dash length
+    
+    // Create traveling marker
+    const markerIcon = L.divIcon({
+      className: 'traveling-marker',
+      html: `<div style="width: 12px; height: 12px; background: #f4a261; border-radius: 50%; box-shadow: 0 0 12px #f4a261, 0 0 24px #e76f51;"></div>`,
+      iconSize: [12, 12],
+      iconAnchor: [6, 6]
+    });
+    
+    mapMarkerLayer = L.marker([arc.startLat, arc.startLng], { icon: markerIcon }).addTo(leafletMap);
+    
+    function tick(now) {
+      if (!isAnimating()) {
+        resolve();
+        return;
+      }
+      
+      const t = Math.min((now - startTime) / duration, 1);
+      
+      // Ease-in-out
+      const eased = t < 0.5 
+        ? 2 * t * t 
+        : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      
+      // Update route dash to "draw" the line
+      mapRouteLayer.setStyle({
+        dashArray: `${eased * totalLength}, ${totalLength}`
+      });
+      
+      // Update marker position
+      const lat = arc.startLat + (arc.endLat - arc.startLat) * eased;
+      const lng = arc.startLng + (arc.endLng - arc.startLng) * eased;
+      mapMarkerLayer.setLatLng([lat, lng]);
+      
+      if (t < 1 && isAnimating()) {
+        requestAnimationFrame(tick);
+      } else {
+        // Brief pause at destination
+        setTimeout(resolve, 200);
+      }
+    }
+    
+    requestAnimationFrame(tick);
+  });
+}
+
+/**
+ * Hide the 2D map overlay with zoom-out transition
+ * @returns {Promise} Resolves when transition is complete
+ */
+async function hideMapOverlay() {
+  const overlay = $('map-overlay');
+  if (!overlay) return;
+  
+  // Trigger zoom-out transition
+  overlay.classList.add('zooming-out');
+  overlay.classList.remove('visible');
+  
+  // Wait for CSS transition
+  await sleep(450);
+  
+  // Clean up map layers
+  if (leafletMap) {
+    leafletMap.eachLayer(layer => {
+      if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+        leafletMap.removeLayer(layer);
+      }
+    });
+    mapRouteLayer = null;
+    mapMarkerLayer = null;
+  }
+  
+  overlay.classList.remove('zooming-out');
+}
+</script>
+

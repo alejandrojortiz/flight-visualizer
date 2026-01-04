@@ -1,0 +1,9 @@
+# Ignore everything except Apps Script files
+**/**
+!appsscript.json
+!**/*.gs
+!**/*.html
+
+# Ignore setup documentation (not needed in deployed app)
+SETUP.md
+
