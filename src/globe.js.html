@@ -25,9 +25,9 @@ function getArcColor(tripId) {
  * Get arc stroke width based on selection state
  */
 function getArcStroke(tripId) {
-  if (!selectedTripId) return 1.5;           // Normal width
-  if (tripId === selectedTripId) return 2.5; // Thicker when selected
-  return 0.8;                                 // Thinner when muted
+  if (!selectedTripId) return 0.8;           // Normal width
+  if (tripId === selectedTripId) return 1.2; // Thicker when selected
+  return 0.4;                                 // Thinner when muted
 }
 
 /**
@@ -121,7 +121,7 @@ function buildArcDataForTrip(trip) {
       distance: distance,
       altitude: getArcAltitude(distance, leg.mode),
       color: '#f4a261',
-      stroke: 2,
+      stroke: 1.2,
       mode: leg.mode
     });
   });
